@@ -17,8 +17,8 @@ const STABLE_BASES: &[&str] = &[
     // other fiat-pegged
     "EURQ", "EURR", "EURC", "EUROP", "TGBP", "QCAD", "AUDX", "BRL1", "MXNB", "COPM",
 ];
-/// Gold-backed tokens.
-const GOLD_BASES: &[&str] = &["PAXG", "XAUT"];
+/// Commodity-backed tokens (gold, uranium).
+const COMMODITY_BASES: &[&str] = &["PAXG", "XAUT", "XU3O8"];
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct PairArgs {
@@ -31,9 +31,9 @@ pub struct PairArgs {
     /// Include fiat/USD pairs (EUR, GBP, AUD, ...).
     #[arg(long)]
     pub include_fiat: bool,
-    /// Include gold-backed token pairs (PAXG, XAUT).
+    /// Include commodity-backed token pairs (PAXG, XAUT, XU3O8).
     #[arg(long)]
-    pub include_gold: bool,
+    pub include_commodities: bool,
     /// Only pairs whose status is `online` (excludes cancel_only / post_only).
     #[arg(long)]
     pub online_only: bool,
@@ -49,7 +49,7 @@ pub fn is_usd_crypto(p: &PairInfo, args: &PairArgs) -> bool {
     if !args.include_stablecoins && STABLE_BASES.contains(&p.base.as_str()) {
         return false;
     }
-    if !args.include_gold && GOLD_BASES.contains(&p.base.as_str()) {
+    if !args.include_commodities && COMMODITY_BASES.contains(&p.base.as_str()) {
         return false;
     }
     if args.online_only && p.status != "online" {
@@ -108,7 +108,7 @@ mod tests {
         let a = PairArgs {
             include_stablecoins: true,
             include_fiat: true,
-            include_gold: true,
+            include_commodities: true,
             ..Default::default()
         };
         assert!(is_usd_crypto(&stable, &a) && is_usd_crypto(&fiat, &a) && is_usd_crypto(&gold, &a));

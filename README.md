@@ -11,7 +11,7 @@ cargo run --release -- update                            # last 720 days + anyth
 cargo run --release -- verify                            # integrity checks + live comparison
 ```
 
-Common flags: `--data-dir data`, `--pairs XBTUSD ETHUSD`, `--epoch` (Unix-second timestamps), `--include-stablecoins`, `--include-fiat`, `--include-gold`, `--online-only`, `--rate-ms 1100`.
+Common flags: `--data-dir data`, `--pairs XBTUSD ETHUSD`, `--epoch` (Unix-second timestamps), `--include-stablecoins`, `--include-fiat`, `--include-commodities`, `--online-only`, `--rate-ms 1100`.
 
 ## Why two sources
 The REST OHLC endpoint returns only the latest 720 candles (~2 years). Older history comes from Kraken's bulk OHLCVT zip (linked from Kraken's support site: "Downloadable historical OHLCVT data"). Download it once and run `import --path` on the zip (or on the folder you extracted it into); then `update` fills the recent window and keeps it current.
