@@ -1,0 +1,30 @@
+[package]
+name = "kraken-downloader"
+version = "0.1.0"
+edition = "2021"
+description = "Builds a local CSV dataset of daily OHLCV candles for all USD-quoted Kraken pairs"
+
+[lib]
+name = "kraken_downloader"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kraken-downloader"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive"] }
+csv = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3"
+wiremock = "0.6"
