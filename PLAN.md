@@ -18,7 +18,7 @@ Modules (`src/`):
 - `pairs.rs` – calls `AssetPairs`, keeps pairs whose quote is `ZUSD`/`USD` and status `online`, skips dark-pool `.d` pairs. Stablecoin/USD pairs (USDT, USDC...) excluded by default; `--include-stablecoins` keeps them. `--pairs` overrides discovery. Maps Kraken legacy names (`XXBTZUSD`) to `altname` (`XBTUSD`), which is also the bulk-file naming.
 - `import.rs` – `import --zip <Kraken_OHLCVT.zip>`: reads `<ALTNAME>_1440.csv` (headerless: `unix_ts,open,high,low,close,volume,trades`) for the selected USD pairs and writes/merges into the store. The source file's trades column is read but not stored.
 - `update.rs` – fetches OHLC for each pair, merges into the store, drops the still-open current-day candle. Works incrementally; if the stored data ends more than 720 days ago it warns that a newer bulk file is needed.
-- `store.rs` – CSV per pair `data/<ALTNAME>_1d.csv`; merge, dedupe by timestamp, ascending sort; on overlap, prefers REST OHLC values and reports differences vs bulk.
+- `store.rs` – CSV per pair `data/<ALTNAME>.csv`; merge, dedupe by timestamp, ascending sort; on overlap, prefers REST OHLC values and reports differences vs bulk.
 - `verify.rs` – local integrity checks (gaps, non-midnight timestamps, invalid OHLC) plus a live comparison against the REST endpoint.
 - `main.rs` – clap subcommands: `list-pairs`, `import`, `update`, `verify`.
 

@@ -6,18 +6,18 @@ Builds a local CSV dataset of **daily OHLCV** candles (UTC days, closed at 00:00
 
 ```
 cargo run --release -- list-pairs                       # USD pairs that would be processed
-cargo run --release -- import --zip Kraken_OHLCVT.zip   # full history from Kraken's bulk download
+cargo run --release -- import --path Kraken_OHLCVT.zip  # full history from Kraken's bulk download
 cargo run --release -- update                            # last 720 days + anything new (run after 00:00 UTC)
 cargo run --release -- verify                            # integrity checks + live comparison
 ```
 
-Common flags: `--data-dir data`, `--pairs XBTUSD ETHUSD`, `--epoch` (Unix-second timestamps), `--include-stablecoins`, `--include-fiat`, `--online-only`, `--rate-ms 1100`.
+Common flags: `--data-dir data`, `--pairs XBTUSD ETHUSD`, `--epoch` (Unix-second timestamps), `--include-stablecoins`, `--include-fiat`, `--include-gold`, `--online-only`, `--rate-ms 1100`.
 
 ## Why two sources
-The REST OHLC endpoint returns only the latest 720 candles (~2 years). Older history comes from Kraken's bulk OHLCVT zip (linked from Kraken's support site: "Downloadable historical OHLCVT data"). Download it once and run `import`; then `update` fills the recent window and keeps it current.
+The REST OHLC endpoint returns only the latest 720 candles (~2 years). Older history comes from Kraken's bulk OHLCVT zip (linked from Kraken's support site: "Downloadable historical OHLCVT data"). Download it once and run `import --path` on the zip (or on the folder you extracted it into); then `update` fills the recent window and keeps it current.
 
 ## CSV format
-`data/<PAIR>_1d.csv`, ascending, one row per completed UTC day:
+`data/<PAIR>.csv` (e.g. `data/XBTUSD.csv`), ascending, one row per completed UTC day:
 
 ```
 timestamp,symbol,open,high,low,close,volume

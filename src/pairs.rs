@@ -7,10 +7,18 @@ use clap::Args;
 const FIAT_BASES: &[&str] = &[
     "ZEUR", "ZGBP", "ZAUD", "ZCAD", "ZJPY", "CHF", "EUR", "GBP", "AUD", "CAD", "JPY",
 ];
+/// Fiat-pegged tokens (USD and other currencies). Kraken keeps listing new ones, so check
+/// `list-pairs` for near-constant prices after a new listing appears.
 const STABLE_BASES: &[&str] = &[
-    "USDT", "USDC", "DAI", "PYUSD", "RLUSD", "USD1", "USDG", "USDQ", "USDR", "EURQ", "EURR",
-    "TUSD", "FDUSD", "USDD", "UST",
+    // USD-pegged
+    "USDT", "USDC", "DAI", "PYUSD", "RLUSD", "USD1", "USDG", "USDQ", "USDR", "TUSD", "FDUSD",
+    "USDD", "UST", "AUSD", "CASH", "FIDD", "FRNT", "USAT", "USDE", "USDGO", "USDPT", "USDS",
+    "USDSM", "USTABLES",
+    // other fiat-pegged
+    "EURQ", "EURR", "EURC", "EUROP", "TGBP", "QCAD", "AUDX", "BRL1", "MXNB", "COPM",
 ];
+/// Gold-backed tokens.
+const GOLD_BASES: &[&str] = &["PAXG", "XAUT"];
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct PairArgs {
@@ -23,6 +31,9 @@ pub struct PairArgs {
     /// Include fiat/USD pairs (EUR, GBP, AUD, ...).
     #[arg(long)]
     pub include_fiat: bool,
+    /// Include gold-backed token pairs (PAXG, XAUT).
+    #[arg(long)]
+    pub include_gold: bool,
     /// Only pairs whose status is `online` (excludes cancel_only / post_only).
     #[arg(long)]
     pub online_only: bool,
@@ -36,6 +47,9 @@ pub fn is_usd_crypto(p: &PairInfo, args: &PairArgs) -> bool {
         return false;
     }
     if !args.include_stablecoins && STABLE_BASES.contains(&p.base.as_str()) {
+        return false;
+    }
+    if !args.include_gold && GOLD_BASES.contains(&p.base.as_str()) {
         return false;
     }
     if args.online_only && p.status != "online" {
@@ -87,9 +101,17 @@ mod tests {
     fn flags_widen_and_narrow() {
         let stable = p("USDCUSD", "USDC", "ZUSD", "online");
         let fiat = p("EURUSD", "ZEUR", "ZUSD", "online");
+        let gold = p("PAXGUSD", "PAXG", "ZUSD", "online");
         let post = p("FOOUSD", "FOO", "ZUSD", "post_only");
-        let a = PairArgs { include_stablecoins: true, include_fiat: true, ..Default::default() };
-        assert!(is_usd_crypto(&stable, &a) && is_usd_crypto(&fiat, &a));
+        let d = PairArgs::default();
+        assert!(!is_usd_crypto(&gold, &d) && !is_usd_crypto(&p("EURCUSD", "EURC", "ZUSD", "online"), &d));
+        let a = PairArgs {
+            include_stablecoins: true,
+            include_fiat: true,
+            include_gold: true,
+            ..Default::default()
+        };
+        assert!(is_usd_crypto(&stable, &a) && is_usd_crypto(&fiat, &a) && is_usd_crypto(&gold, &a));
         let a = PairArgs { online_only: true, ..Default::default() };
         assert!(!is_usd_crypto(&post, &a));
     }

@@ -108,7 +108,7 @@ impl Store {
     }
 
     pub fn path(&self, altname: &str) -> PathBuf {
-        self.dir.join(format!("{altname}_1d.csv"))
+        self.dir.join(format!("{altname}.csv"))
     }
 
     pub fn exists(&self, altname: &str) -> bool {
