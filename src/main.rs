@@ -3,7 +3,9 @@ use clap::{Parser, Subcommand};
 use kraken_downloader::client::{Client, DEFAULT_BASE};
 use kraken_downloader::pairs::{self, PairArgs};
 use kraken_downloader::store::Store;
+use kraken_downloader::import::Selection;
 use kraken_downloader::{import, update, verify};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -35,6 +37,10 @@ enum Cmd {
         /// Path to the downloaded Kraken OHLCVT zip, or a folder it was extracted into.
         #[arg(long)]
         path: PathBuf,
+        /// Only import currently listed pairs. By default, USD pairs that are in the bulk data
+        /// but no longer listed (delisted) are imported too, to avoid survivorship bias.
+        #[arg(long)]
+        skip_delisted: bool,
         #[command(flatten)]
         pairs: PairArgs,
     },
@@ -78,10 +84,25 @@ async fn main() -> Result<()> {
             }
             println!("{} pairs", found.len());
         }
-        Cmd::Import { path, pairs: args } => {
-            let wanted = pairs::resolve(&client, &args).await?;
-            let n = import::import_source(&path, &wanted, &store)?;
-            println!("imported {n} of {} pairs into {}", wanted.len(), cli.data_dir.display());
+        Cmd::Import { path, skip_delisted, pairs: args } => {
+            if skip_delisted || !args.pairs.is_empty() {
+                let wanted = pairs::resolve(&client, &args).await?;
+                let r = import::import_source(&path, &Selection::only(&wanted), &store)?;
+                println!("imported {} of {} listed pairs", r.listed, wanted.len());
+            } else {
+                let all = client.asset_pairs().await?;
+                let listed: HashSet<String> = all.iter().map(|p| p.altname.clone()).collect();
+                let wanted: Vec<String> = all
+                    .into_iter()
+                    .filter(|p| pairs::is_usd_crypto(p, &args))
+                    .map(|p| p.altname)
+                    .collect();
+                let delisted = |p: &str| pairs::is_delisted_usd_crypto(p, &listed, &args);
+                let sel = Selection { listed: &wanted, extra: &delisted };
+                let r = import::import_source(&path, &sel, &store)?;
+                println!("imported {} of {} listed pairs", r.listed, wanted.len());
+                println!("imported {} delisted pairs: {}", r.extra.len(), r.extra.join(" "));
+            }
         }
         Cmd::Update(args) => {
             let wanted = pairs::resolve(&client, &args).await?;
@@ -95,17 +116,28 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Verify { no_live, pairs: args } => {
-            let wanted = if args.pairs.is_empty() {
-                // Verify what is on disk rather than what is currently listed.
-                let discovered = pairs::resolve(&client, &args).await?;
-                discovered.into_iter().filter(|p| store.exists(p)).collect()
+            // Verify what is on disk: listed pairs get the live comparison, files for pairs that
+            // are no longer listed (delisted) get local checks only.
+            let (wanted, delisted) = if args.pairs.is_empty() {
+                let all = client.asset_pairs().await?;
+                let listed: HashSet<String> = all.iter().map(|p| p.altname.clone()).collect();
+                let wanted: Vec<String> = all
+                    .into_iter()
+                    .filter(|p| pairs::is_usd_crypto(p, &args) && store.exists(&p.altname))
+                    .map(|p| p.altname)
+                    .collect();
+                let delisted: Vec<String> =
+                    store.list()?.into_iter().filter(|p| !listed.contains(p)).collect();
+                (wanted, delisted)
             } else {
-                pairs::resolve(&client, &args).await?
+                (pairs::resolve(&client, &args).await?, Vec::new())
             };
-            if !verify::verify_pairs(&client, &store, &wanted, !no_live).await {
+            let mut ok = verify::verify_pairs(&client, &store, &wanted, !no_live).await;
+            ok &= verify::verify_pairs(&client, &store, &delisted, false).await;
+            if !ok {
                 bail!("verification found problems");
             }
-            println!("all {} pairs OK", wanted.len());
+            println!("all {} pairs OK ({} delisted, local checks only)", wanted.len() + delisted.len(), delisted.len());
         }
     }
     Ok(())

@@ -115,6 +115,24 @@ impl Store {
         self.path(altname).exists()
     }
 
+    /// Pair names of all CSVs in the data directory (not subdirectories), sorted.
+    pub fn list(&self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        if !self.dir.exists() {
+            return Ok(out);
+        }
+        for entry in fs::read_dir(&self.dir).with_context(|| format!("reading {}", self.dir.display()))? {
+            let path = entry?.path();
+            if path.is_file() && path.extension().is_some_and(|e| e == "csv") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    out.push(stem.to_string());
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
     /// Loads the file expected to hold `altname`. The file's own `symbol` column is the
     /// source of truth: a mismatch (renamed/misplaced file) is an error, not a silent trust
     /// of the filename.

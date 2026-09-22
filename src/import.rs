@@ -33,10 +33,15 @@ pub fn parse_bulk_csv(reader: impl Read) -> Result<Vec<Candle>> {
 }
 
 /// Merge freshly-parsed bulk candles for one pair into the store and log the result.
-fn merge_and_save(store: &Store, pair: &str, candles: Vec<Candle>) -> Result<()> {
+/// Returns false (and writes nothing) when the file had no completed days.
+fn merge_and_save(store: &Store, pair: &str, candles: Vec<Candle>) -> Result<bool> {
     // A bulk row for a day that is not finished yet must not be stored.
     let now = chrono::Utc::now().timestamp();
     let candles: Vec<Candle> = candles.into_iter().filter(|c| c.ts + DAY <= now).collect();
+    if candles.is_empty() {
+        tracing::warn!("{pair}: bulk file has no completed days; skipped");
+        return Ok(false);
+    }
     let mut series = store.load(pair)?;
     let stats = merge(&mut series, candles, false);
     store.save(pair, &series)?;
@@ -46,84 +51,130 @@ fn merge_and_save(store: &Store, pair: &str, candles: Vec<Candle>) -> Result<()>
         series.len(),
         stats.mismatched
     );
-    Ok(())
+    Ok(true)
 }
 
-fn warn_missing(wanted: &HashSet<&str>, found: &HashSet<&str>) {
-    for w in wanted.iter().filter(|w| !found.contains(**w)) {
-        tracing::warn!("{w}: no {w}_1440.csv found (new listing or not in bulk data); use `update`");
+/// Pair name of a bulk daily file (`.../XBTUSD_1440.csv` -> `XBTUSD`). macOS metadata that
+/// often ships inside the zip or the extracted folder (`__MACOSX/`, `._XBTUSD_1440.csv`) is
+/// ignored.
+fn bulk_pair(path: &str) -> Option<&str> {
+    if path.contains("__MACOSX") {
+        return None;
+    }
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    if base.starts_with("._") {
+        return None;
+    }
+    base.strip_suffix("_1440.csv")
+}
+
+/// Which bulk files to import: the `listed` pairs (a warning is logged for each one the bulk
+/// data lacks) plus any other pair name `extra` accepts (used for delisted pairs).
+pub struct Selection<'a> {
+    pub listed: &'a [String],
+    pub extra: &'a dyn Fn(&str) -> bool,
+}
+
+impl Selection<'_> {
+    /// Only the given pairs, nothing extra.
+    pub fn only(listed: &[String]) -> Selection<'_> {
+        Selection { listed, extra: &|_| false }
     }
 }
 
-/// Import from Kraken's bulk zip archive. Returns the number of pairs imported.
-pub fn import_zip(zip_path: &Path, wanted: &[String], store: &Store) -> Result<usize> {
-    let file = File::open(zip_path).with_context(|| format!("opening {}", zip_path.display()))?;
-    let mut archive = zip::ZipArchive::new(file).context("reading zip")?;
-    let wanted: HashSet<&str> = wanted.iter().map(String::as_str).collect();
+#[derive(Debug, Default)]
+pub struct ImportReport {
+    /// Listed pairs imported.
+    pub listed: usize,
+    /// Pairs imported through `Selection::extra` (delisted).
+    pub extra: Vec<String>,
+}
 
-    let mut entries: Vec<(usize, String)> = Vec::new();
-    for i in 0..archive.len() {
-        let name = archive.by_index(i)?.name().to_string();
-        let base = name.rsplit(['/', '\\']).next().unwrap_or(&name);
-        if let Some(pair) = base.strip_suffix("_1440.csv") {
-            if wanted.contains(pair) {
-                entries.push((i, pair.to_string()));
+/// Picks the bulk files to import from `(locator, pair)` candidates and imports them in name
+/// order, reading each through `open`.
+fn import_entries<L, R: Read>(
+    candidates: Vec<(L, String)>,
+    sel: &Selection,
+    store: &Store,
+    mut open: impl FnMut(&L) -> Result<R>,
+) -> Result<ImportReport> {
+    let listed: HashSet<&str> = sel.listed.iter().map(String::as_str).collect();
+    let mut picked: Vec<(L, String, bool)> = candidates
+        .into_iter()
+        .filter_map(|(loc, pair)| {
+            let is_listed = listed.contains(pair.as_str());
+            (is_listed || (sel.extra)(&pair)).then_some((loc, pair, is_listed))
+        })
+        .collect();
+    picked.sort_by(|a, b| a.1.cmp(&b.1));
+    picked.dedup_by(|a, b| a.1 == b.1);
+
+    let found: HashSet<&str> = picked.iter().map(|(_, p, _)| p.as_str()).collect();
+    for w in sel.listed.iter().filter(|w| !found.contains(w.as_str())) {
+        tracing::warn!("{w}: no {w}_1440.csv found (new listing or not in bulk data); use `update`");
+    }
+
+    let mut report = ImportReport::default();
+    for (loc, pair, is_listed) in &picked {
+        let candles = parse_bulk_csv(open(loc)?).with_context(|| format!("{pair}_1440.csv"))?;
+        if merge_and_save(store, pair, candles)? {
+            if *is_listed {
+                report.listed += 1;
+            } else {
+                report.extra.push(pair.clone());
             }
         }
     }
-    warn_missing(&wanted, &entries.iter().map(|(_, p)| p.as_str()).collect());
+    Ok(report)
+}
 
-    let mut imported = 0;
-    for (idx, pair) in entries {
-        let candles = parse_bulk_csv(archive.by_index(idx)?).with_context(|| format!("{pair}_1440.csv"))?;
-        merge_and_save(store, &pair, candles)?;
-        imported += 1;
+/// Import from Kraken's bulk zip archive.
+pub fn import_zip(zip_path: &Path, sel: &Selection, store: &Store) -> Result<ImportReport> {
+    let file = File::open(zip_path).with_context(|| format!("opening {}", zip_path.display()))?;
+    let mut archive = zip::ZipArchive::new(file).context("reading zip")?;
+    let mut candidates = Vec::new();
+    for i in 0..archive.len() {
+        let name = archive.by_index(i)?.name().to_string();
+        if let Some(pair) = bulk_pair(&name) {
+            candidates.push((i, pair.to_string()));
+        }
     }
-    Ok(imported)
+    import_entries(candidates, sel, store, |&i| {
+        // Read the entry fully so the archive borrow ends before the next one.
+        let mut buf = Vec::new();
+        archive.by_index(i)?.read_to_end(&mut buf)?;
+        Ok(std::io::Cursor::new(buf))
+    })
 }
 
 /// Import from a directory the bulk zip was already extracted into (files may be flat or in
-/// subdirectories; only `<PAIR>_1440.csv` files are read). Returns the number of pairs imported.
-pub fn import_dir(dir: &Path, wanted: &[String], store: &Store) -> Result<usize> {
-    let wanted: HashSet<&str> = wanted.iter().map(String::as_str).collect();
-    let mut entries: Vec<(std::path::PathBuf, String)> = Vec::new();
+/// subdirectories; only `<PAIR>_1440.csv` files are read).
+pub fn import_dir(dir: &Path, sel: &Selection, store: &Store) -> Result<ImportReport> {
+    let mut candidates = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
         for entry in fs::read_dir(&d).with_context(|| format!("reading {}", d.display()))? {
-            let entry = entry?;
-            let path = entry.path();
+            let path = entry?.path();
             if path.is_dir() {
                 stack.push(path);
-                continue;
-            }
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if let Some(pair) = name.strip_suffix("_1440.csv") {
-                    if wanted.contains(pair) {
-                        entries.push((path.clone(), pair.to_string()));
-                    }
-                }
+            } else if let Some(pair) = path.to_str().and_then(bulk_pair) {
+                let pair = pair.to_string();
+                candidates.push((path, pair));
             }
         }
     }
-    warn_missing(&wanted, &entries.iter().map(|(_, p)| p.as_str()).collect());
-
-    let mut imported = 0;
-    for (path, pair) in entries {
-        let file = File::open(&path).with_context(|| format!("opening {}", path.display()))?;
-        let candles = parse_bulk_csv(file).with_context(|| format!("{}", path.display()))?;
-        merge_and_save(store, &pair, candles)?;
-        imported += 1;
-    }
-    Ok(imported)
+    import_entries(candidates, sel, store, |path| {
+        File::open(path).with_context(|| format!("opening {}", path.display()))
+    })
 }
 
 /// Import from either a zip file or a directory of already-extracted bulk CSVs, based on
 /// what `path` points to.
-pub fn import_source(path: &Path, wanted: &[String], store: &Store) -> Result<usize> {
+pub fn import_source(path: &Path, sel: &Selection, store: &Store) -> Result<ImportReport> {
     if path.is_dir() {
-        import_dir(path, wanted, store)
+        import_dir(path, sel, store)
     } else {
-        import_zip(path, wanted, store)
+        import_zip(path, sel, store)
     }
 }
 
@@ -155,11 +206,14 @@ mod tests {
             z.write_all(b"1381017600,1,1,1,1,1,1\n").unwrap();
             z.start_file("Kraken_OHLCVT/XBTEUR_1440.csv", opts).unwrap();
             z.write_all(b"1381017600,1,1,1,1,1,1\n").unwrap();
+            z.start_file("__MACOSX/Kraken_OHLCVT/._XBTUSD_1440.csv", opts).unwrap();
+            z.write_all(b"\x00\x05\x16\x07 binary junk").unwrap();
             z.finish().unwrap();
         }
         let store = Store::new(dir.path().join("data"), false);
-        let n = import_source(&zip_path, &["XBTUSD".to_string(), "ETHUSD".to_string()], &store).unwrap();
-        assert_eq!(n, 1);
+        let wanted = ["XBTUSD".to_string(), "ETHUSD".to_string()];
+        let r = import_source(&zip_path, &Selection::only(&wanted), &store).unwrap();
+        assert_eq!(r.listed, 1);
         assert_eq!(store.load("XBTUSD").unwrap().len(), 1);
         assert!(!store.exists("XBTEUR"));
         assert!(!store.exists("ETHUSD"));
@@ -173,12 +227,35 @@ mod tests {
         fs::write(bulk_dir.join("XBTUSD_1440.csv"), b"1381017600,122.0,122.0,122.0,122.0,0.1,1\n").unwrap();
         fs::write(bulk_dir.join("XBTUSD_60.csv"), b"1381017600,1,1,1,1,1,1\n").unwrap();
         fs::write(bulk_dir.join("XBTEUR_1440.csv"), b"1381017600,1,1,1,1,1,1\n").unwrap();
+        fs::write(bulk_dir.join("._XBTUSD_1440.csv"), b"\x00\x05\x16\x07 binary junk").unwrap();
 
         let store = Store::new(dir.path().join("data"), false);
-        let n = import_source(&bulk_dir, &["XBTUSD".to_string(), "ETHUSD".to_string()], &store).unwrap();
-        assert_eq!(n, 1);
+        let wanted = ["XBTUSD".to_string(), "ETHUSD".to_string()];
+        let r = import_source(&bulk_dir, &Selection::only(&wanted), &store).unwrap();
+        assert_eq!(r.listed, 1);
         assert_eq!(store.load("XBTUSD").unwrap().len(), 1);
         assert!(!store.exists("XBTEUR"));
         assert!(!store.exists("ETHUSD"));
+    }
+
+    #[test]
+    fn imports_extra_pairs_and_skips_empty_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let bulk_dir = dir.path().join("bulk");
+        fs::create_dir_all(&bulk_dir).unwrap();
+        fs::write(bulk_dir.join("XBTUSD_1440.csv"), b"1381017600,1,1,1,1,1,1\n").unwrap();
+        fs::write(bulk_dir.join("EOSUSD_1440.csv"), b"1381017600,2,2,2,2,2,2\n").unwrap();
+        fs::write(bulk_dir.join("CGNUSD_1440.csv"), b"").unwrap();
+        fs::write(bulk_dir.join("XBTPYUSD_1440.csv"), b"1381017600,3,3,3,3,3,3\n").unwrap();
+
+        let store = Store::new(dir.path().join("data"), false);
+        let wanted = ["XBTUSD".to_string()];
+        let extra = |p: &str| p != "XBTPYUSD";
+        let r = import_source(&bulk_dir, &Selection { listed: &wanted, extra: &extra }, &store).unwrap();
+        assert_eq!(r.listed, 1);
+        assert_eq!(r.extra, vec!["EOSUSD".to_string()]);
+        assert!(store.exists("EOSUSD"));
+        assert!(!store.exists("CGNUSD"), "empty bulk file must not create a CSV");
+        assert!(!store.exists("XBTPYUSD"));
     }
 }

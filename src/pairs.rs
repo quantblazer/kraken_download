@@ -3,6 +3,7 @@
 use crate::client::{Client, PairInfo};
 use anyhow::Result;
 use clap::Args;
+use std::collections::HashSet;
 
 const FIAT_BASES: &[&str] = &[
     "ZEUR", "ZGBP", "ZAUD", "ZCAD", "ZJPY", "CHF", "EUR", "GBP", "AUD", "CAD", "JPY",
@@ -15,10 +16,13 @@ const STABLE_BASES: &[&str] = &[
     "USDD", "UST", "AUSD", "CASH", "FIDD", "FRNT", "USAT", "USDE", "USDGO", "USDPT", "USDS",
     "USDSM", "USTABLES",
     // other fiat-pegged
-    "EURQ", "EURR", "EURC", "EUROP", "TGBP", "QCAD", "AUDX", "BRL1", "MXNB", "COPM",
+    "EURQ", "EURR", "EURT", "EURC", "EUROP", "TGBP", "QCAD", "AUDX", "BRL1", "MXNB", "COPM",
 ];
 /// Commodity-backed tokens (gold, uranium).
 const COMMODITY_BASES: &[&str] = &["PAXG", "XAUT", "XU3O8"];
+/// Quote currencies whose names end in "USD" but are not USD (e.g. `XBTPYUSD` is XBT/PYUSD).
+/// Only needed for delisted pairs, where the base/quote split comes from the name alone.
+const USD_LIKE_QUOTES: &[&str] = &["PYUSD", "RLUSD", "FDUSD"];
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct PairArgs {
@@ -43,19 +47,33 @@ pub fn is_usd_crypto(p: &PairInfo, args: &PairArgs) -> bool {
     if !(p.quote == "ZUSD" || p.quote == "USD") || p.altname.ends_with(".d") {
         return false;
     }
-    if !args.include_fiat && FIAT_BASES.contains(&p.base.as_str()) {
-        return false;
-    }
-    if !args.include_stablecoins && STABLE_BASES.contains(&p.base.as_str()) {
-        return false;
-    }
-    if !args.include_commodities && COMMODITY_BASES.contains(&p.base.as_str()) {
+    if excluded_base(&p.base, args) {
         return false;
     }
     if args.online_only && p.status != "online" {
         return false;
     }
     true
+}
+
+/// True when `base` belongs to a category the flags leave out (fiat, stablecoin, commodity).
+fn excluded_base(base: &str, args: &PairArgs) -> bool {
+    (!args.include_fiat && FIAT_BASES.contains(&base))
+        || (!args.include_stablecoins && STABLE_BASES.contains(&base))
+        || (!args.include_commodities && COMMODITY_BASES.contains(&base))
+}
+
+/// Whether a pair name found only in the bulk data (not in today's AssetPairs, i.e. delisted)
+/// should be imported. The base is taken from the name itself (`EOSUSD` -> `EOS`), and the
+/// same category filters as for listed pairs apply.
+pub fn is_delisted_usd_crypto(altname: &str, listed: &HashSet<String>, args: &PairArgs) -> bool {
+    if listed.contains(altname) || USD_LIKE_QUOTES.iter().any(|q| altname.ends_with(q)) {
+        return false;
+    }
+    match altname.strip_suffix("USD") {
+        Some(base) if !base.is_empty() => !excluded_base(base, args),
+        _ => false,
+    }
 }
 
 pub async fn discover(client: &Client, args: &PairArgs) -> Result<Vec<PairInfo>> {
@@ -114,5 +132,24 @@ mod tests {
         assert!(is_usd_crypto(&stable, &a) && is_usd_crypto(&fiat, &a) && is_usd_crypto(&gold, &a));
         let a = PairArgs { online_only: true, ..Default::default() };
         assert!(!is_usd_crypto(&post, &a));
+    }
+
+    #[test]
+    fn delisted_candidates() {
+        let listed: HashSet<String> = ["XBTUSD", "USDCUSD"].iter().map(|s| s.to_string()).collect();
+        let a = PairArgs::default();
+        assert!(is_delisted_usd_crypto("EOSUSD", &listed, &a));
+        assert!(is_delisted_usd_crypto("LUNA2USD", &listed, &a));
+        assert!(!is_delisted_usd_crypto("XBTUSD", &listed, &a), "still listed");
+        assert!(!is_delisted_usd_crypto("USDCUSD", &listed, &a), "listed but filtered");
+        assert!(!is_delisted_usd_crypto("XBTPYUSD", &listed, &a), "PYUSD quote");
+        assert!(!is_delisted_usd_crypto("XRPRLUSD", &listed, &a), "RLUSD quote");
+        assert!(!is_delisted_usd_crypto("XBTEUR", &listed, &a));
+        assert!(!is_delisted_usd_crypto("USD", &listed, &a));
+        for stable_or_fiat in ["USDTUSD", "DAIUSD", "EURTUSD", "EURUSD", "GBPUSD", "TUSDUSD"] {
+            assert!(!is_delisted_usd_crypto(stable_or_fiat, &listed, &a), "{stable_or_fiat}");
+        }
+        let wide = PairArgs { include_fiat: true, ..Default::default() };
+        assert!(is_delisted_usd_crypto("EURUSD", &listed, &wide));
     }
 }

@@ -46,6 +46,6 @@ timestamp,symbol,open,high,low,close,volume
 6. Rerun `update` and confirm it is idempotent (no duplicates, only new rows appended).
 
 ## Assumptions to confirm
-- "Listed" = currently online USD pairs; delisted pairs are only picked up if they exist in the bulk zip and you ask for them by name.
+- Delisted USD pairs found in the bulk zip are imported by default (survivorship bias); `import --skip-delisted` opts out. `update` never touches them and `verify` checks them locally only.
 - User downloads the bulk zip manually from Kraken's support page (link to be recorded in the README after checking the current URL).
 - CSV only for now; Parquet can be added later.

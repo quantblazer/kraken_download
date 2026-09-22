@@ -31,6 +31,9 @@ Prices and volume are the exact decimal strings from Kraken. The still-forming c
 ## API keys
 Not used. If private endpoints are ever added, read keys from environment variables (`KRAKEN_API_KEY`, `KRAKEN_API_SECRET`) or a git-ignored `.env`; never store them in the repo or the data files.
 
+## Delisted pairs
+To avoid survivorship bias, `import` also brings in USD pairs that exist in the bulk data but are no longer listed on Kraken (e.g. EOSUSD, MATICUSD, FTMUSD), with the same stablecoin/fiat/commodity filters. Their history ends when trading stopped. `update` leaves them alone (the REST endpoint no longer serves them) and `verify` runs only the local checks on them. Use `import --skip-delisted` to import listed pairs only.
+
 ## Notes
 - TLS uses the OS certificate store (`rustls-tls-native-roots`), which is needed behind antivirus/proxy HTTPS inspection.
 - Days with no trades have no candle, so `verify` can report gaps for illiquid pairs; that is expected.
