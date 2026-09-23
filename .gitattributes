@@ -1,0 +1,2 @@
+# Keep the dataset byte-identical to what the tool writes (LF, no CRLF conversion).
+*.csv text eol=lf

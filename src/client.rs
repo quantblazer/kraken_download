@@ -135,6 +135,12 @@ impl Client {
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let c = parse_row(row).with_context(|| format!("parsing OHLC row {row}"))?;
+            // When a pair has had no trades since `since`, Kraken answers with a placeholder
+            // row of zeros timestamped 0 rather than an empty array. It is not a candle.
+            if c.ts <= 0 {
+                tracing::debug!("{altname}: ignoring placeholder row {row}");
+                continue;
+            }
             if c.ts + DAY <= now {
                 out.push(c);
             }

@@ -9,6 +9,9 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 
+/// How far back Kraken's OHLC endpoint reaches; `update` owns the days inside this window.
+const REST_WINDOW_DAYS: i64 = 720;
+
 pub fn parse_bulk_csv(reader: impl Read) -> Result<Vec<Candle>> {
     let mut rdr = csv::ReaderBuilder::new().has_headers(false).flexible(true).from_reader(reader);
     let mut out = Vec::new();
@@ -34,7 +37,12 @@ pub fn parse_bulk_csv(reader: impl Read) -> Result<Vec<Candle>> {
 
 /// Merge freshly-parsed bulk candles for one pair into the store and log the result.
 /// Returns false (and writes nothing) when the file had no completed days.
-fn merge_and_save(store: &Store, pair: &str, candles: Vec<Candle>) -> Result<bool> {
+///
+/// Kraken restates bulk data between releases (mostly volume, occasionally a price), so a newer
+/// bulk file wins over what is stored — except inside the REST window, where `update` has put
+/// live OHLC data that is the better source. `rest_backed` is false for delisted pairs, whose
+/// stored rows all came from bulk data, so the newer file wins for their whole history.
+fn merge_and_save(store: &Store, pair: &str, candles: Vec<Candle>, rest_backed: bool) -> Result<bool> {
     // A bulk row for a day that is not finished yet must not be stored.
     let now = chrono::Utc::now().timestamp();
     let candles: Vec<Candle> = candles.into_iter().filter(|c| c.ts + DAY <= now).collect();
@@ -42,14 +50,23 @@ fn merge_and_save(store: &Store, pair: &str, candles: Vec<Candle>) -> Result<boo
         tracing::warn!("{pair}: bulk file has no completed days; skipped");
         return Ok(false);
     }
+    let cutoff = if rest_backed {
+        now - now.rem_euclid(DAY) - REST_WINDOW_DAYS * DAY
+    } else {
+        i64::MAX
+    };
+    let (old, recent): (Vec<Candle>, Vec<Candle>) = candles.into_iter().partition(|c| c.ts < cutoff);
+
     let mut series = store.load(pair)?;
-    let stats = merge(&mut series, candles, false);
+    let revised = merge(&mut series, old, true);
+    let kept = merge(&mut series, recent, false);
     store.save(pair, &series)?;
     tracing::info!(
-        "{pair}: imported {} new days ({} total, {} overlapping rows differed)",
-        stats.added,
+        "{pair}: imported {} new days, {} revised ({} total, {} REST-window rows differed and were kept)",
+        revised.added + kept.added,
+        revised.replaced,
         series.len(),
-        stats.mismatched
+        kept.mismatched
     );
     Ok(true)
 }
@@ -117,7 +134,7 @@ fn import_entries<L, R: Read>(
     let mut report = ImportReport::default();
     for (loc, pair, is_listed) in &picked {
         let candles = parse_bulk_csv(open(loc)?).with_context(|| format!("{pair}_1440.csv"))?;
-        if merge_and_save(store, pair, candles)? {
+        if merge_and_save(store, pair, candles, *is_listed)? {
             if *is_listed {
                 report.listed += 1;
             } else {
@@ -236,6 +253,48 @@ mod tests {
         assert_eq!(store.load("XBTUSD").unwrap().len(), 1);
         assert!(!store.exists("XBTEUR"));
         assert!(!store.exists("ETHUSD"));
+    }
+
+    #[test]
+    fn newer_bulk_revises_old_days_but_not_the_rest_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let bulk_dir = dir.path().join("bulk");
+        fs::create_dir_all(&bulk_dir).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let today = now - now.rem_euclid(DAY);
+        let old_day = today - 1000 * DAY; // older than the 720-day REST window
+        let recent_day = today - 10 * DAY; // inside it, owned by `update`
+
+        let store = Store::new(dir.path().join("data"), false);
+        let stored = |ts: i64, v: &str| Candle {
+            ts,
+            open: "1".into(),
+            high: "1".into(),
+            low: "1".into(),
+            close: "1".into(),
+            volume: v.into(),
+        };
+        let mut series = crate::store::Series::new();
+        series.insert(old_day, stored(old_day, "10"));
+        series.insert(recent_day, stored(recent_day, "10"));
+        store.save("XBTUSD", &series).unwrap();
+
+        // Same two days, restated volume, as a newer bulk release would have.
+        let bulk = format!("{old_day},1,1,1,1,11,1\n{recent_day},1,1,1,1,11,1\n");
+        fs::write(bulk_dir.join("XBTUSD_1440.csv"), bulk).unwrap();
+        let wanted = ["XBTUSD".to_string()];
+        import_source(&bulk_dir, &Selection::only(&wanted), &store).unwrap();
+
+        let got = store.load("XBTUSD").unwrap();
+        assert_eq!(got[&old_day].volume, "11", "newer bulk wins outside the REST window");
+        assert_eq!(got[&recent_day].volume, "10", "REST data wins inside the window");
+
+        // A delisted pair has no REST data, so the newer bulk wins for every day.
+        fs::rename(bulk_dir.join("XBTUSD_1440.csv"), bulk_dir.join("EOSUSD_1440.csv")).unwrap();
+        store.save("EOSUSD", &series).unwrap();
+        let extra = |p: &str| p == "EOSUSD";
+        import_source(&bulk_dir, &Selection { listed: &[], extra: &extra }, &store).unwrap();
+        assert_eq!(store.load("EOSUSD").unwrap()[&recent_day].volume, "11");
     }
 
     #[test]

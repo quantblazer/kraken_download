@@ -4,11 +4,16 @@ use crate::client::Client;
 use crate::store::{differs, fmt_ts, Series, Store, DAY};
 use anyhow::Result;
 
+/// Kraken's first trading day (2013-09-01); anything older is not real data.
+const KRAKEN_EPOCH: i64 = 1_377_993_600;
+
 #[derive(Debug, Default)]
 pub struct LocalReport {
     pub rows: usize,
     pub bad_ohlc: Vec<String>,
     pub not_midnight: usize,
+    /// Rows dated before Kraken existed — a placeholder/garbage timestamp, never real data.
+    pub bad_ts: usize,
     /// Days with no candle between first and last date (legitimate if there were no trades).
     pub gap_days: usize,
     pub first_gaps: Vec<String>,
@@ -20,6 +25,9 @@ pub fn check_local(series: &Series) -> LocalReport {
     for c in series.values() {
         if c.ts % DAY != 0 {
             r.not_midnight += 1;
+        }
+        if c.ts < KRAKEN_EPOCH {
+            r.bad_ts += 1;
         }
         let f = |s: &str| s.parse::<f64>().ok();
         match (f(&c.open), f(&c.high), f(&c.low), f(&c.close), f(&c.volume)) {
@@ -92,14 +100,15 @@ pub async fn verify_pairs(client: &Client, store: &Store, pairs: &[String], live
         let l = check_local(&series);
         let first = series.keys().next().map(|t| fmt_ts(*t, false)).unwrap_or_default();
         let last = series.keys().next_back().map(|t| fmt_ts(*t, false)).unwrap_or_default();
-        let mut ok = l.bad_ohlc.is_empty() && l.not_midnight == 0;
+        let mut ok = l.bad_ohlc.is_empty() && l.not_midnight == 0 && l.bad_ts == 0;
         println!(
-            "{pair}: {} rows {first} .. {last}; gaps {} days{}; bad OHLC {}; non-midnight {}",
+            "{pair}: {} rows {first} .. {last}; gaps {} days{}; bad OHLC {}; non-midnight {}; bad timestamps {}",
             l.rows,
             l.gap_days,
             if l.first_gaps.is_empty() { String::new() } else { format!(" [{}]", l.first_gaps.join(", ")) },
             l.bad_ohlc.len(),
-            l.not_midnight
+            l.not_midnight,
+            l.bad_ts
         );
         if live {
             match compare_live(client, &series, pair).await {

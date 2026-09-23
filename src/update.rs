@@ -26,7 +26,12 @@ async fn update_one(client: &Client, store: &Store, pair: &str) -> Result<String
     let mut series = store.load(pair)?;
     // Re-fetch the last two stored days so a previously partial/late-corrected day is refreshed.
     let since = series.keys().next_back().map(|last| last - 2 * DAY);
-    let candles = client.daily_ohlc(pair, since).await?;
+    let mut candles = client.daily_ohlc(pair, since).await?;
+    if candles.is_empty() && since.is_some() {
+        // A pair with no trades in the `since` window still has flat candles, but Kraken only
+        // returns them for an unfiltered request; fall back to the full 720-day window.
+        candles = client.daily_ohlc(pair, None).await?;
+    }
     if candles.is_empty() {
         return Ok("no completed candles returned".into());
     }

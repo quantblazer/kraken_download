@@ -1,4 +1,5 @@
 /target
 
-# Downloaded/generated dataset and run logs — regenerate with `update` / `import`.
-/data
+# Dataset: the per-pair CSVs are tracked; run logs, backups and set-aside pairs are not.
+/data/*
+!/data/*.csv
