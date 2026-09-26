@@ -20,6 +20,10 @@ const STABLE_BASES: &[&str] = &[
 ];
 /// Commodity-backed tokens (gold, uranium).
 const COMMODITY_BASES: &[&str] = &["PAXG", "XAUT", "XU3O8"];
+/// Wrapped and liquid-staking tokens: near-duplicates of XBT/ETH/SOL rather than their own
+/// market (WBTC tracks BTC to ~0.7%; staking tokens track the underlying plus accrued yield).
+const WRAPPED_BASES: &[&str] =
+    &["WBTC", "TBTC", "METH", "CMETH", "LSETH", "MSOL", "JITOSOL", "LSSOL"];
 /// Quote currencies whose names end in "USD" but are not USD (e.g. `XBTPYUSD` is XBT/PYUSD).
 /// Only needed for delisted pairs, where the base/quote split comes from the name alone.
 const USD_LIKE_QUOTES: &[&str] = &["PYUSD", "RLUSD", "FDUSD"];
@@ -38,6 +42,9 @@ pub struct PairArgs {
     /// Include commodity-backed token pairs (PAXG, XAUT, XU3O8).
     #[arg(long)]
     pub include_commodities: bool,
+    /// Include wrapped/liquid-staking token pairs (WBTC, TBTC, MSOL, ...).
+    #[arg(long)]
+    pub include_wrapped: bool,
     /// Only pairs whose status is `online` (excludes cancel_only / post_only).
     #[arg(long)]
     pub online_only: bool,
@@ -61,6 +68,7 @@ fn excluded_base(base: &str, args: &PairArgs) -> bool {
     (!args.include_fiat && FIAT_BASES.contains(&base))
         || (!args.include_stablecoins && STABLE_BASES.contains(&base))
         || (!args.include_commodities && COMMODITY_BASES.contains(&base))
+        || (!args.include_wrapped && WRAPPED_BASES.contains(&base))
 }
 
 /// Whether a pair name found only in the bulk data (not in today's AssetPairs, i.e. delisted)
@@ -120,6 +128,10 @@ mod tests {
         let stable = p("USDCUSD", "USDC", "ZUSD", "online");
         let fiat = p("EURUSD", "ZEUR", "ZUSD", "online");
         let gold = p("PAXGUSD", "PAXG", "ZUSD", "online");
+        let wrapped = p("WBTCUSD", "WBTC", "ZUSD", "online");
+        assert!(!is_usd_crypto(&wrapped, &PairArgs::default()));
+        let w = PairArgs { include_wrapped: true, ..Default::default() };
+        assert!(is_usd_crypto(&wrapped, &w));
         let post = p("FOOUSD", "FOO", "ZUSD", "post_only");
         let d = PairArgs::default();
         assert!(!is_usd_crypto(&gold, &d) && !is_usd_crypto(&p("EURCUSD", "EURC", "ZUSD", "online"), &d));
